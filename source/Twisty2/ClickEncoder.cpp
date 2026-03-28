@@ -23,7 +23,7 @@
 // Acceleration configuration (for 1000Hz calls to ::service())
 //
 #define ENC_ACCEL_TOP      3072   // max. acceleration: *12 (val >> 8)
-#define ENC_ACCEL_INC        50
+#define ENC_ACCEL_INC        60
 #define ENC_ACCEL_DEC         2
 
 // ----------------------------------------------------------------------------

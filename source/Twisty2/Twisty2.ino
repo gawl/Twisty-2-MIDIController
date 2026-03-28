@@ -39,17 +39,17 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include <Adafruit_TinyUSB.h>  
+#include <Adafruit_TinyUSB.h>
 #include <MIDI.h>
 #include "Clickencoder.h"
 //#include "StepSeq.h"
 #include <Adafruit_NeoPixel.h>
 #include <ArduinoJson.h>
 #include "LittleFS.h"
-#include <Control_Surface.h>
 
-#define BLUETOOTH  // define for bluetooth MIDI - you MUST set up IPV4 + Bluetooth stack in the arduino Tools menu
+//#define BLUETOOTH  // define for bluetooth MIDI - disabled for non-W Pico
 #ifdef BLUETOOTH
+#include <Control_Surface.h>
 #include <MIDI_Interfaces/BluetoothMIDI_Interface.hpp>
 #endif
 
@@ -120,7 +120,7 @@ bool LEDstate;   // for LED flash
 #define RMENU_ENCSW_IN 20
 
 // encoders - use an array of clickencoder objects for the 16 multiplexed encoders
-#define ENCDIVIDE 4  // divide by 4 works best with my encoders
+#define ENCDIVIDE 1  // divide by 4 works best with my encoders
 ClickEncoder enc[NUMENCODERS] = {
   ClickEncoder(ENCA_IN,ENCB_IN,ENCSW_IN,ENCDIVIDE), 
   ClickEncoder(ENCA_IN,ENCB_IN,ENCSW_IN,ENCDIVIDE), 
@@ -140,18 +140,21 @@ ClickEncoder enc[NUMENCODERS] = {
   ClickEncoder(ENCA_IN,ENCB_IN,ENCSW_IN,ENCDIVIDE)
 };
 
-ClickEncoder lmenuenc(LMENU_ENCA_IN,LMENU_ENCB_IN,LMENU_ENCSW_IN,ENCDIVIDE); // left menu encoder object
-ClickEncoder rmenuenc(RMENU_ENCA_IN,RMENU_ENCB_IN,RMENU_ENCSW_IN,ENCDIVIDE); // right menu encoder object
-
-// use Control Surface MIDI
-USBMIDI_Interface usbMIDI;
-
-HardwareSerialMIDI_Interface serialMIDI {Serial1, MIDI_BAUD};
+ClickEncoder lmenuenc(LMENU_ENCB_IN,LMENU_ENCA_IN,LMENU_ENCSW_IN,4); // left menu encoder object
+ClickEncoder rmenuenc(RMENU_ENCB_IN,RMENU_ENCA_IN,RMENU_ENCSW_IN,4); // right menu encoder object
 
 #ifdef BLUETOOTH
 // Instantiate a MIDI over BLE interface
-BluetoothMIDI_Interface bleMIDI;
+// BluetoothMIDI_Interface midi_ble;
 #endif
+
+// USB MIDI object
+Adafruit_USBD_MIDI usb_midi;
+// attach usb_midi as the transport.
+MIDI_CREATE_INSTANCE(Adafruit_USBD_MIDI, usb_midi, MidiUSB);
+
+// serial MIDI object
+MIDI_CREATE_INSTANCE(HardwareSerial, Serial1, serialMIDI);
 
 #define BASE_CC 16  // lowest default CC number to use
 #define DEFAULT_VELOCITY 127
@@ -201,12 +204,12 @@ struct controller {
 
 // initialize all the controller settings
 void initcontrols(void) {
-  int16_t ccnum=BASE_CC;
+  int16_t ccnumber=BASE_CC;
   for (int16_t p=0;p<CONTROLLER_PAGES;++p) {
     for (int16_t i=0; i<NUMENCODERS;++i) {
       controls[p].encoder[i].type=CCTYPE;
       controls[p].encoder[i].channel=DEFAULT_ENCODER_CHANNEL;
-      controls[p].encoder[i].ccnumber=ccnum;
+      controls[p].encoder[i].ccnumber=ccnumber;
       controls[p].encoder[i].minvalue=0;
       controls[p].encoder[i].maxvalue=127;
       controls[p].encoder[i].value=64;
@@ -215,13 +218,12 @@ void initcontrols(void) {
       controls[p].encswitch[i].mode=TOGGLE;
       controls[p].encswitch[i].type=CCTYPE;
       controls[p].encswitch[i].channel=DEFAULT_SWITCH_CHANNEL;
-      controls[p].encswitch[i].ccnumber=ccnum;
+      controls[p].encswitch[i].ccnumber=ccnumber++;
       controls[p].encswitch[i].minvalue=0;
       controls[p].encswitch[i].maxvalue=127;
       controls[p].encswitch[i].value=0;
       controls[p].encswitch[i].colorindex=p;  // not used for now
       controls[p].encswitch[i].labelindex=0;  // label index 0 is "CC"
-      ++ccnum;
     }  
   }
 }
@@ -278,27 +280,12 @@ int16_t UI_state=UI_SEND_MIDI;
 
 #define TIMER_MICROS 1000 // interrupt period
 
-// RP2040 timer code from https://github.com/raspberrypi/pico-examples/blob/master/timer/timer_lowlevel/timer_lowlevel.c
-// Use alarm 0
-#define ALARM_NUM 0
-#define ALARM_IRQ timer_hardware_alarm_get_irq_num(timer_hw, ALARM_NUM)
-
-static void alarm_in_us(uint32_t delay_us) {
-  hw_set_bits(&timer_hw->inte, 1u << ALARM_NUM);
-  irq_set_exclusive_handler(ALARM_IRQ, alarm_irq);
-  irq_set_enabled(ALARM_IRQ, true);
-  alarm_in_us_arm(delay_us);
-}
-
-static void alarm_in_us_arm(uint32_t delay_us) {
-  uint64_t target = timer_hw->timerawl + delay_us;
-  timer_hw->alarm[ALARM_NUM] = (uint32_t) target;
-}
+// Timer using Pico SDK repeating_timer (compatible with earlephilhower core)
+struct repeating_timer scan_timer;
 
 // timer interrupt handler
 // scans thru the multiplexed encoders and handles the menu encoders
-
-static void alarm_irq(void) {
+bool scan_timer_callback(struct repeating_timer *t) {
   for (int addr=0; addr< NUMENCODERS;++addr) {
     digitalWrite(A_MUX_0, addr & 1);
     digitalWrite(A_MUX_1, addr & 2);
@@ -309,8 +296,7 @@ static void alarm_irq(void) {
   } 
   lmenuenc.service(); // handle the menu encoders which are on different port pins
   rmenuenc.service(); // 
-  hw_clear_bits(&timer_hw->intr, 1u << ALARM_NUM); // clear IRQ flag
-  alarm_in_us_arm(TIMER_MICROS);  // reschedule interrupt
+  return true; // keep repeating
 }
 
 // set up as include files because I'm too lazy to create proper header and .cpp files
@@ -320,20 +306,22 @@ static void alarm_irq(void) {
  // midi related stuff
 
 void sendnoteOn(uint8_t channel,uint8_t pitch, uint8_t velocity) {
-  MIDIAddress midiaddress ={pitch,Channel_1 + (channel-1)}; // control surface library requires this form of MIDI addressing -I'm not a fan of the design but its the only Arduino BLE MIDI library I could find
-  usbMIDI.sendNoteOn(midiaddress, velocity);
-  serialMIDI.sendNoteOn(midiaddress, velocity);
+  MidiUSB.sendNoteOn(pitch,velocity,channel);
+  serialMIDI.sendNoteOn(pitch,velocity,channel);
 #ifdef BLUETOOTH
-  bleMIDI.sendNoteOn(midiaddress, velocity);
+// control surface library requires this form of MIDI addressing -I'm not a fan of the design but its the only Arduino BLE MIDI library I could find
+// **** control surface library bug **** won't send note on/off correctly. works if note is a constant, fails if it is a variable
+//  MIDIAddress midiaddress ={pitch,Channel_1 + (channel-1)};
+//  midi_ble.sendNoteOn(midiaddress, velocity);
 #endif
 }
 
 void sendnoteOff(uint8_t channel, uint8_t pitch,uint8_t velocity) {
-  MIDIAddress midiaddress= {pitch,Channel_1 + (channel-1)};
-  usbMIDI.sendNoteOff(midiaddress, velocity);
-  serialMIDI.sendNoteOff(midiaddress, velocity);
+  MidiUSB.sendNoteOff(pitch,velocity,channel);
+  serialMIDI.sendNoteOff(pitch,velocity,channel);
 #ifdef BLUETOOTH
-  bleMIDI.sendNoteOff(midiaddress, velocity);
+//  MIDIAddress midiaddress= {pitch,Channel_1 + (channel-1)};
+//  midi_ble.sendNoteOff(midiaddress, velocity);
 #endif
 }
 
@@ -342,11 +330,11 @@ void sendnoteOff(uint8_t channel, uint8_t pitch,uint8_t velocity) {
 // 3rd parameter is the control value (0-127).
 
 void sendcontrolChange(uint8_t channel, uint8_t control, uint8_t value) {
-  MIDIAddress midiaddress= {control,Channel_1 + (channel-1)};  
-  usbMIDI.sendControlChange(midiaddress, value); 
-  serialMIDI.sendControlChange(midiaddress, value); 
+  MidiUSB.sendControlChange(control,value,channel);
+  serialMIDI.sendControlChange(control,value,channel);
 #ifdef BLUETOOTH
-  bleMIDI.sendControlChange(midiaddress, value); 
+  MIDIAddress midiaddress= {control,Channel_1 + (channel-1)};  // confusing way of sending MIDI messages 
+  // midi_ble.sendControlChange(midiaddress, value); 
 #endif
 }
 
@@ -354,11 +342,11 @@ void sendcontrolChange(uint8_t channel, uint8_t control, uint8_t value) {
 // 2nd parameter is the PC value (0-127).
 
 void sendprogramChange(uint8_t channel, uint8_t value) {
-  MIDIAddress midiaddress= {value,Channel_1 + (channel-1)};  // confusing way of sending MIDI messages
-  usbMIDI.sendProgramChange(midiaddress); 
-  serialMIDI.sendProgramChange(midiaddress); 
+  MidiUSB.sendProgramChange(value,channel);
+  serialMIDI.sendProgramChange(value,channel);
 #ifdef BLUETOOTH
-  bleMIDI.sendProgramChange(midiaddress); 
+  MIDIAddress midiaddress= {value,Channel_1 + (channel-1)};  // confusing way of sending MIDI messages
+  // midi_ble.sendProgramChange(midiaddress); 
 #endif
 }
 
@@ -601,8 +589,8 @@ void setup() {
   Wire1.setSCL(PIN_WIRE_SCL);
   Wire1.begin();
 
-// set up timer interrupt 
-  alarm_in_us(TIMER_MICROS);
+// set up timer interrupt - negative value means interval in microseconds
+  add_repeating_timer_us(-TIMER_MICROS, scan_timer_callback, NULL, &scan_timer);
  
   // SSD1306_SWITCHCAPVCC = generate display voltage from 3.3V internally
   if(!display.begin(SSD1306_SWITCHCAPVCC, SCREEN_ADDRESS)) {
@@ -625,15 +613,31 @@ void setup() {
   showencoderLEDs(0); // show page 0 encoder LED colors
   LEDS.show();
 
-  if (!LittleFS.begin()) fatalerror("Can't mount FS"); // start up filesystem
+ if (!LittleFS.begin()) fatalerror("Can't mount FS"); // start up filesystem
+
+ serialMIDI.begin(MIDI_CHANNEL_OMNI);  // hardware serial port
+
+// Manual begin() is required on core without built-in support e.g. mbed rp2040
+  if (!TinyUSBDevice.isInitialized()) {
+    TinyUSBDevice.begin(0);
+  }
+  usb_midi.setStringDescriptor("Twisty 2 MIDI");
+  // Initialize USB MIDI, and listen to all MIDI channels
+  MidiUSB.begin(MIDI_CHANNEL_OMNI);
 
 #ifdef BLUETOOTH
-  bleMIDI.setName("Twisty 2");
+    // Change the name of the BLE device (must be done before initializing it)
+  // midi_ble.setName("Twisty2");
+  // Initialize the BT MIDI interface
+  MIDI_Interface::beginAll();
 #endif
 
-  MIDI_Interface::beginAll();
-
-//  Control_Surface.begin(); // Initialize the Control Surface MIDI interfaces
+  // If already enumerated, additional class driver begin() e.g msc, hid, midi won't take effect until re-enumeration
+  if (TinyUSBDevice.mounted()) {
+    TinyUSBDevice.detach();
+    delay(10);
+    TinyUSBDevice.attach();
+  }
 
   display.clearDisplay();
   display.setTextSize(1);  
@@ -651,7 +655,12 @@ void loop() {
   ClickEncoder::ButtonEvent event;
   int16_t t,n;
 
-  MIDI_Interface::updateAll(); // Update the Control Surface MIDI interfaces
+  // read any new MIDI messages
+  MidiUSB.read(); 
+
+#ifdef BLUETOOTH
+  // midi_ble.update();  // Update the Control Surface for BLE MIDI
+#endif
 
   if ((millis()-displaytimer) > DISPLAY_BLANK_MS) blankdisplay(); // protect the OLED from burnin
 
