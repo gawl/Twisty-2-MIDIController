@@ -165,4 +165,20 @@ Arduino JSON  https://arduinojson.org/
 
 Control Surface  https://github.com/tttapa/Control-Surface
 
+## Fork Notes (gawl)
+
+### Changes from original:
+- **Timer fix:** Replaced low-level alarm-based timer with Pico SDK `repeating_timer` for compatibility with newer versions of the Earle Philhower Arduino core
+- **Bluetooth optional:** `#define BLUETOOTH` commented out by default for non-W Pico boards
+
+### Build notes:
+- Tested with Arduino IDE and Earle Philhower RP2040/RP2350 core v5.5.1
+- In Tools menu set: USB Stack → Adafruit TinyUSB, Flash Size → with FS partition (128KB+)
+- Do NOT install the external Adafruit TinyUSB library — use the one built into the core
+- For Pico W/Pico 2W with Bluetooth: uncomment `#define BLUETOOTH` in Twisty2.ino
+
+### Planned features:
+- MIDI input (CC feedback from DAW to sync encoder values)
+- 14-bit CC support (high resolution control)
+
 
